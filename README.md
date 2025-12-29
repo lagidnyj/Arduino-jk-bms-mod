@@ -1,7 +1,7 @@
 # Arduino script with NimBLE to monitor JK-BMS 
 
 This project is a modified version of [syssi/esphome-jk-bms](https://github.com/syssi/esphome-jk-bms/), rewritten for Arduino using NimBLE.
-Usefull for v11 and v15 BMS but not for v19 until now.
+Usefull for v11 / v15 BMS and also for v19 but there seem to be differences depending on [which ESP32](https://github.com/peff74/Arduino-jk-bms/issues/7#issuecomment-3515887170) you use.
 
 ## Features
 *   **Real-time Monitoring**:
