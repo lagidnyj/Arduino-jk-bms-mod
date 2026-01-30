@@ -68,11 +68,23 @@ void monitorFreeHeap() {
 }
 
 void setupLittleFS() {
-  if (!LittleFS.begin()) {
-    DEBUG_PRINTLN("LittleFS Mount Failed");
-    return;
-  }
-  DEBUG_PRINTLN("LittleFS Mounted Successfully");
+//  if (!LittleFS.begin()) {
+//    DEBUG_PRINTLN("LittleFS Mount Failed");
+//    return;
+//  }
+//  DEBUG_PRINTLN("LittleFS Mounted Successfully");
+
+if (!LittleFS.begin()) {
+    Serial.println("LittleFS mount failed, formatting...");
+    if (LittleFS.format()) {
+        Serial.println("LittleFS formatted successfully.");
+        if (LittleFS.begin()) {
+            Serial.println("LittleFS mounted successfully.");
+        }
+    }
+}
+
+
 }
 
 // lesbare Anzeige der Speichergrößen
