@@ -1,3 +1,10 @@
+# FORK DIFF
+new functions marked as // --- new function name ---
+added average calculation of time to full discharge/charge of the battery
+text formatting reduced, unnecessary elements removed to save space on the screen
+added moving BMS to the second column, for simultaneous display next to each other (in css)
+added fix for mounting file system for the first time
+
 # Arduino script with NimBLE to monitor JK-BMS 
 
 This project is a modified version of [syssi/esphome-jk-bms](https://github.com/syssi/esphome-jk-bms/), rewritten for Arduino using NimBLE.
