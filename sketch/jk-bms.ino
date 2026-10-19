@@ -271,12 +271,11 @@ public:
     : bms(bmsInstance) {}
 
   void onConnect(NimBLEClient* pClient) {
-    DEBUG_PRINTF("Connected to %s\n", bms->targetMAC.c_str());
     bms->connected = true;
   }
 
   void onDisconnect(NimBLEClient* pClient, int reason) {
-    DEBUG_PRINTF("%s disconnected, reason: %d\n", bms->targetMAC.c_str(), reason);
+    DEBUG_PRINTF("BMS %s disconnected (reason %d)\n", bms->targetMAC.c_str(), reason);
     bms->connected = false;
     bms->doConnect = false;
   }
@@ -284,11 +283,10 @@ public:
 
 class ScanCallbacks : public NimBLEScanCallbacks {
   void onResult(const NimBLEAdvertisedDevice* advertisedDevice) {
-    DEBUG_PRINTF("BLE Device found: %s\n", advertisedDevice->toString().c_str());
     for (int i = 0; i < bmsDeviceCount; i++) {
       if (jkBmsDevices[i].targetMAC.empty()) continue;  // Skip empty MAC addresses
       if (advertisedDevice->getAddress().toString() == jkBmsDevices[i].targetMAC && !jkBmsDevices[i].connected && !jkBmsDevices[i].doConnect) {
-        DEBUG_PRINTF("Found target device: %s\n", jkBmsDevices[i].targetMAC.c_str());
+        DEBUG_PRINTF("Target BMS found: %s (RSSI %d dBm)\n", jkBmsDevices[i].targetMAC.c_str(), advertisedDevice->getRSSI());
         jkBmsDevices[i].advDevice = advertisedDevice;
         jkBmsDevices[i].doConnect = true;
         NimBLEDevice::getScan()->stop();
@@ -298,7 +296,6 @@ class ScanCallbacks : public NimBLEScanCallbacks {
 } scanCallbacks;
 
 void notifyCB(NimBLERemoteCharacteristic* pChr, uint8_t* pData, size_t length, bool isNotify) {
-  DEBUG_PRINTLN("Notification received...");
   for (int i = 0; i < bmsDeviceCount; i++) {
     if (jkBmsDevices[i].pChr == pChr) {
       jkBmsDevices[i].handleNotification(pData, length);
@@ -311,30 +308,26 @@ void notifyCB(NimBLERemoteCharacteristic* pChr, uint8_t* pData, size_t length, b
 // JKBMS Method Implementation
 //********************************************
 bool JKBMS::connectToServer() {
-  DEBUG_PRINTF("Attempting to connect to %s...\n", targetMAC.c_str());
   NimBLEClient* pClient = NimBLEDevice::getClientByPeerAddress(advDevice->getAddress());
 
   if (!pClient) {
     pClient = NimBLEDevice::createClient();
-    DEBUG_PRINTLN("New client created.");
     pClient->setClientCallbacks(new ClientCallbacks(this), true);
     pClient->setConnectionParams(12, 12, 0, 150);
     pClient->setConnectTimeout(5000);
   }
 
   if (!pClient->connect(advDevice)) {
-    DEBUG_PRINTF("Failed to connect to %s\n", targetMAC.c_str());
+    DEBUG_PRINTF("BMS connection failed: %s\n", targetMAC.c_str());
     return false;
   }
-
-  DEBUG_PRINTF("Connected to: %s RSSI: %d\n", pClient->getPeerAddress().toString().c_str(), pClient->getRssi());
 
   NimBLERemoteService* pSvc = pClient->getService("ffe0");
   if (pSvc) {
     pChr = pSvc->getCharacteristic("ffe1");
     if (pChr && pChr->canNotify()) {
       if (pChr->subscribe(true, notifyCB)) {
-        DEBUG_PRINTF("Subscribed to notifications for %s\n", pChr->getUUID().toString().c_str());
+        DEBUG_PRINTF("BMS connected: %s (RSSI %d dBm)\n", targetMAC.c_str(), pClient->getRssi());
         delay(500);
         writeRegister(0x97, 0x00000000, 0x00);  // COMMAND_DEVICE_INFO
         delay(500);
@@ -348,18 +341,15 @@ bool JKBMS::connectToServer() {
 }
 
 void JKBMS::handleNotification(uint8_t* pData, size_t length) {
-  DEBUG_PRINTLN("Handling notification...");
   lastNotifyTime = millis();
 
   if (ignoreNotifyCount > 0) {
     ignoreNotifyCount--;
-    DEBUG_PRINTF("Ignoring notification. Remaining: %d\n", ignoreNotifyCount);
     return;
   }
 
   // Check for start of data frame
   if (pData[0] == 0x55 && pData[1] == 0xAA && pData[2] == 0xEB && pData[3] == 0x90) {
-    DEBUG_PRINTLN("Start of data frame detected.");
     frame = 0;
     received_start = true;
     received_complete = false;
@@ -369,31 +359,25 @@ void JKBMS::handleNotification(uint8_t* pData, size_t length) {
       receivedBytes[frame++] = pData[i];
     }
   } else if (received_start && !received_complete) {
-    DEBUG_PRINTLN("Continuing data frame...");
     for (int i = 0; i < length; i++) {
       receivedBytes[frame++] = pData[i];
       if (frame >= 300) {
         received_complete = true;
         received_start = false;
         new_data = true;
-        DEBUG_PRINTLN("New data available for parsing.");
 
         // Determine the type of data frame based on pData[4]
         switch (receivedBytes[4]) {  // Use receivedBytes[4] instead of pData[4]
           case 0x01:
-            DEBUG_PRINTLN("BMS Settings frame detected.");
             bms_settings();
             break;
           case 0x02:
-            DEBUG_PRINTLN("Cell data frame detected.");
             parseData();
             break;
           case 0x03:
-            DEBUG_PRINTLN("Device info frame detected.");
             parseDeviceInfo();
             break;
           default:
-            DEBUG_PRINTF("Unknown frame type: 0x%02X\n", receivedBytes[4]);
             break;
         }
 
@@ -404,7 +388,6 @@ void JKBMS::handleNotification(uint8_t* pData, size_t length) {
 }
 
 void JKBMS::writeRegister(uint8_t address, uint32_t value, uint8_t length) {
-  DEBUG_PRINTF("Writing register: address=0x%02X, value=0x%08lX, length=%d\n", address, value, length);
   uint8_t frame[20] = { 0xAA, 0x55, 0x90, 0xEB, address, length };
 
   // Insert value (Little-Endian)
@@ -416,20 +399,12 @@ void JKBMS::writeRegister(uint8_t address, uint32_t value, uint8_t length) {
   // Calculate CRC
   frame[19] = crc(frame, 19);
 
-  // Debug: Print the entire frame in hexadecimal format
-  DEBUG_PRINTF("Frame to be sent: ");
-  for (int i = 0; i < sizeof(frame); i++) {
-    DEBUG_PRINTF("%02X ", frame[i]);
-  }
-  DEBUG_PRINTF("\n");
-
   if (pChr) {
     pChr->writeValue((uint8_t*)frame, (size_t)sizeof(frame));
   }
 }
 
 void JKBMS::bms_settings() {
-  DEBUG_PRINTLN("Processing BMS settings...");
   cell_voltage_undervoltage_protection = ((receivedBytes[13] << 24 | receivedBytes[12] << 16 | receivedBytes[11] << 8 | receivedBytes[10]) * 0.001);
   cell_voltage_undervoltage_recovery = ((receivedBytes[17] << 24 | receivedBytes[16] << 16 | receivedBytes[15] << 8 | receivedBytes[14]) * 0.001);
   cell_voltage_overvoltage_protection = ((receivedBytes[21] << 24 | receivedBytes[20] << 16 | receivedBytes[19] << 8 | receivedBytes[18]) * 0.001);
@@ -459,88 +434,28 @@ void JKBMS::bms_settings() {
   total_battery_capacity = ((receivedBytes[133] << 24 | receivedBytes[132] << 16 | receivedBytes[131] << 8 | receivedBytes[130]) * 0.001);
   short_circuit_protection_delay = ((receivedBytes[137] << 24 | receivedBytes[136] << 16 | receivedBytes[135] << 8 | receivedBytes[134]) * 1);
   balance_starting_voltage = ((receivedBytes[141] << 24 | receivedBytes[140] << 16 | receivedBytes[139] << 8 | receivedBytes[138]) * 0.001);
-
-
-
-
-  DEBUG_PRINTF("Cell voltage undervoltage protection: %.2fV\n", cell_voltage_undervoltage_protection);
-  DEBUG_PRINTF("Cell voltage undervoltage recovery: %.2fV\n", cell_voltage_undervoltage_recovery);
-  DEBUG_PRINTF("Cell voltage overvoltage protection: %.2fV\n", cell_voltage_overvoltage_protection);
-  DEBUG_PRINTF("Cell voltage overvoltage recovery: %.2fV\n", cell_voltage_overvoltage_recovery);
-  DEBUG_PRINTF("Balance trigger voltage: %.2fV\n", balance_trigger_voltage);
-  DEBUG_PRINTF("Power off voltage: %.2fV\n", power_off_voltage);
-
-  DEBUG_PRINTF("Max charge current: %.2fA\n", max_charge_current);
-  DEBUG_PRINTF("Charge overcurrent protection delay: %.2fs\n", charge_overcurrent_protection_delay);
-  DEBUG_PRINTF("Charge overcurrent protection recovery time: %.2fs\n", charge_overcurrent_protection_recovery_time);
-  DEBUG_PRINTF("Max discharge current: %.2fA\n", max_discharge_current);
-  DEBUG_PRINTF("Discharge overcurrent protection delay: %.2fs\n", discharge_overcurrent_protection_delay);
-  DEBUG_PRINTF("Discharge overcurrent protection recovery time: %.2fs\n", discharge_overcurrent_protection_recovery_time);
-  DEBUG_PRINTF("Short circuit protection recovery time: %.2fs\n", short_circuit_protection_recovery_time);
-  DEBUG_PRINTF("Max balance current: %.2fA\n", max_balance_current);
-  DEBUG_PRINTF("Charge overtemperature protection: %.2fC\n", charge_overtemperature_protection);
-  DEBUG_PRINTF("Charge overtemperature protection recovery: %.2fC\n", charge_overtemperature_protection_recovery);
-  DEBUG_PRINTF("Discharge overtemperature protection: %.2fC\n", discharge_overtemperature_protection);
-  DEBUG_PRINTF("Discharge overtemperature protection recovery: %.2fC\n", discharge_overtemperature_protection_recovery);
-  DEBUG_PRINTF("Charge undertemperature protection: %.2fC\n", charge_undertemperature_protection);
-  DEBUG_PRINTF("Charge undertemperature protection recovery: %.2fC\n", charge_undertemperature_protection_recovery);
-  DEBUG_PRINTF("Power tube overtemperature protection: %.2fC\n", power_tube_overtemperature_protection);
-  DEBUG_PRINTF("Power tube overtemperature protection recovery: %.2fC\n", power_tube_overtemperature_protection_recovery);
-  DEBUG_PRINTF("Cell count: %.d\n", cell_count);
-  DEBUG_PRINTF("Total battery capacity: %.2fAh\n", total_battery_capacity);
-  DEBUG_PRINTF("Short circuit protection delay: %.2fus\n", short_circuit_protection_delay);
-  DEBUG_PRINTF("Balance starting voltage: %.2fV\n", balance_starting_voltage);
 }
 
 void JKBMS::parseDeviceInfo() {
-  DEBUG_PRINTLN("Processing device info...");
   new_data = false;
-
-  // Debugging: Ausgabe der empfangenen Bytes
-  DEBUG_PRINTLN("Raw data received:");
-  for (int i = 0; i < frame; i++) {
-    DEBUG_PRINTF("%02X ", receivedBytes[i]);
-    if ((i + 1) % 16 == 0) DEBUG_PRINTLN();  // Neue Zeile nach 16 Bytes
-  }
-  DEBUG_PRINTLN();
 
   // Überprüfen, ob genügend Daten empfangen wurden
   if (frame < 134) {  // 134 Bytes sind für die Geräteinformationen erforderlich
-    DEBUG_PRINTLN("Error: Not enough data received for device info.");
+    DEBUG_PRINTF("Incomplete device info from BMS %s (%d bytes)\n", targetMAC.c_str(), frame);
     return;
   }
 
   // Extrahieren der Geräteinformationen aus den empfangenen Bytes
-  std::string vendorID(receivedBytes + 6, receivedBytes + 6 + 16);
   std::string hardwareVersion(receivedBytes + 22, receivedBytes + 22 + 8);
   std::string softwareVersion(receivedBytes + 30, receivedBytes + 30 + 8);
   uint32_t uptime = (receivedBytes[41] << 24) | (receivedBytes[40] << 16) | (receivedBytes[39] << 8) | receivedBytes[38];
-  uint32_t powerOnCount = (receivedBytes[45] << 24) | (receivedBytes[44] << 16) | (receivedBytes[43] << 8) | receivedBytes[42];
   std::string deviceName(receivedBytes + 46, receivedBytes + 46 + 16);
-  std::string devicePasscode(receivedBytes + 62, receivedBytes + 62 + 16);
-  std::string manufacturingDate(receivedBytes + 78, receivedBytes + 78 + 8);
-  std::string serialNumber(receivedBytes + 86, receivedBytes + 86 + 11);
-  std::string passcode(receivedBytes + 97, receivedBytes + 97 + 5);
-  std::string userData(receivedBytes + 102, receivedBytes + 102 + 16);
-  std::string setupPasscode(receivedBytes + 118, receivedBytes + 118 + 16);
-
-  // Ausgabe der Geräteinformationen
-  DEBUG_PRINTF("  Vendor ID: %s\n", vendorID.c_str());
-  DEBUG_PRINTF("  Hardware version: %s\n", hardwareVersion.c_str());
-  DEBUG_PRINTF("  Software version: %s\n", softwareVersion.c_str());
-  DEBUG_PRINTF("  Uptime: %d s\n", uptime);
-  DEBUG_PRINTF("  Power on count: %d\n", powerOnCount);
-  DEBUG_PRINTF("  Device name: %s\n", deviceName.c_str());
-  DEBUG_PRINTF("  Device passcode: %s\n", devicePasscode.c_str());
-  DEBUG_PRINTF("  Manufacturing date: %s\n", manufacturingDate.c_str());
-  DEBUG_PRINTF("  Serial number: %s\n", serialNumber.c_str());
-  DEBUG_PRINTF("  Passcode: %s\n", passcode.c_str());
-  DEBUG_PRINTF("  User data: %s\n", userData.c_str());
-  DEBUG_PRINTF("  Setup passcode: %s\n", setupPasscode.c_str());
+  DEBUG_PRINTF("BMS info: %s, HW %s, FW %s, uptime %lu s\n",
+               deviceName.c_str(), hardwareVersion.c_str(), softwareVersion.c_str(),
+               static_cast<unsigned long>(uptime));
 }
 
 void JKBMS::parseData() {
-  DEBUG_PRINTLN("Parsing data...");
   new_data = false;
   ignoreNotifyCount = 10;
   // Cell voltages
@@ -619,36 +534,10 @@ void JKBMS::parseData() {
   }
 
 
-  // Output values
-
-  DEBUG_PRINTF("\n--- Data from %s ---\n", targetMAC.c_str());
-  DEBUG_PRINTLN("Cell Voltages:");
-  for (int j = 0; j < 16; j++) {
-    DEBUG_PRINTF("  Cell %02d: %.3f V\n", j + 1, cellVoltage[j]);
-  }
-  DEBUG_PRINTLN("wire Resist:");
-  for (int j = 0; j < 16; j++) {
-    DEBUG_PRINTF("  Cell %02d: %.3f Ohm\n", j + 1, wireResist[j]);
-  }
-  DEBUG_PRINTF("Average Cell Voltage: %.2fV\n", Average_Cell_Voltage);
-  DEBUG_PRINTF("Delta Cell Voltage: %.2fV\n", Delta_Cell_Voltage);
-  DEBUG_PRINTF("Balance Curr: %.2fA\n", Balance_Curr);
-  DEBUG_PRINTF("Battery Voltage: %.2fV\n", Battery_Voltage);
-  DEBUG_PRINTF("Battery Power: %.2fW\n", Battery_Power);
-  DEBUG_PRINTF("Charge Current: %.2fA\n", Charge_Current);
-  DEBUG_PRINTF("Charge: %d%%\n", Percent_Remain);
-  DEBUG_PRINTF("Capacity Remain: %.2fAh\n", Capacity_Remain);
-  DEBUG_PRINTF("Nominal Capacity: %.2fAh\n", Nominal_Capacity);
-  DEBUG_PRINTF("Cycle Count: %.2f\n", Cycle_Count);
-  DEBUG_PRINTF("Cycle Capacity: %.2fAh\n", Cycle_Capacity);
-  DEBUG_PRINTF("Temperature T1: %.1fC\n", Battery_T1);
-  DEBUG_PRINTF("Temperature T2: %.1fC\n", Battery_T2);
-  DEBUG_PRINTF("Temperature MOS: %.1fC\n", MOS_Temp);
-  DEBUG_PRINTF("Uptime: %dd %dh %dm\n", days, hr, mi);
-  DEBUG_PRINTF("Charge: %d\n", Charge);
-  DEBUG_PRINTF("Discharge: %d\n", Discharge);
-  DEBUG_PRINTF("Balance: %d\n", Balance);
-  DEBUG_PRINTF("Balancing Action: %d\n", Balancing_Action);
+  DEBUG_PRINTF("BMS %s: %d%%, %.2f/%.2f Ah, %.2f V, %.2f A, uptime %ud %uh %um\n",
+               targetMAC.c_str(), Percent_Remain, Capacity_Remain, Nominal_Capacity,
+               Battery_Voltage, Charge_Current, static_cast<unsigned>(days),
+               static_cast<unsigned>(hr), static_cast<unsigned>(mi));
 }
 
 
@@ -678,6 +567,7 @@ void handleJSON() {
     device["battery_voltage"] = bms.Battery_Voltage;
     device["battery_power"] = bms.Battery_Power;
     device["charge_current"] = bms.Charge_Current;
+    device["connected"] = bms.connected;
     device["percent_remain"] = bms.Percent_Remain;
     device["capacity_remain"] = bms.Capacity_Remain;
     device["nominal_capacity"] = bms.Nominal_Capacity;
@@ -1031,9 +921,7 @@ void loop() {
     if (jkBmsDevices[i].targetMAC.empty()) continue;  // Skip empty MAC addresses
 
     if (jkBmsDevices[i].doConnect && !jkBmsDevices[i].connected) {
-      if (jkBmsDevices[i].connectToServer()) {
-        DEBUG_PRINTF("%s connected successfully\n", jkBmsDevices[i].targetMAC.c_str());
-      }
+      jkBmsDevices[i].connectToServer();
       jkBmsDevices[i].doConnect = false;
     }
 

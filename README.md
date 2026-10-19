@@ -50,8 +50,45 @@ Usefull for v11 / v15 BMS and also for v19 but there seem to be differences depe
     *   Automatic refresh 
 
 
+## Session Notes
+
+### 2026-10-19
+
+* Added a system summary above the BMS columns in `sketch/index_lite.html`. It averages connected-BMS voltage, sums power/current/capacities, calculates capacity-weighted state of charge, and estimates system charge/discharge time from aggregate capacity and smoothed current.
+* The summary excludes disconnected BMS devices using the `connected` flag added to the `/data` response. Update the firmware as well as the LittleFS HTML/CSS files to use this feature.
+
+### 2026-10-18
+
+* Documented the latest stable toolchain versions available by 2025-02-28, ESP32 platform requirements, and firmware-size troubleshooting. These are historical recommendations, not a verified record of the exact versions used for the original build.
+* Added `sketch/index_lite.html`, which keeps the original page intact and hides the BMS Settings and Wire Resistances sections.
+* Reduced serial debug output in `sketch/jk-bms.ino`. `DEBUG_ENABLED` remains enabled; verbose notification, raw-frame, register, cell, and settings dumps were removed. Concise BMS discovery/RSSI, connection, device info, and telemetry messages remain. Wi-Fi connection and IP messages are unchanged.
+* Added `sketch/test-data.json` with one nine-cell BMS sample based on the README serial log. It is a standalone fixture for experiments; the attempted HTML test-mode integration was reverted.
+* Planned, not implemented: remove web controls, reduce the JSON payload to the required fields, and test remote reporting/control. Multi-BMS behavior and operation on the target ESP32 hardware still need field testing.
+
+
 Installation
 ------------
+
+### Recommended toolchain for a February 2025 build
+
+The versions below were the latest stable releases available by **2025-02-28**. Use this set to reproduce a build from that period; it is a baseline, not a guarantee of the smallest binary.
+
+| Component | Version | Release |
+| --- | --- | --- |
+| Arduino IDE | 2.3.4 | [Release](https://github.com/arduino/arduino-ide/releases/tag/2.3.4) |
+| `esp32` boards by Espressif Systems | 3.1.3 | [Release](https://github.com/espressif/arduino-esp32/releases/tag/3.1.3) |
+| NimBLE-Arduino | 2.2.3 | [Release](https://github.com/h2zero/NimBLE-Arduino/releases/tag/2.2.3) |
+| ArduinoJson | 7.3.1 | [Release](https://github.com/bblanchon/ArduinoJson/releases/tag/v7.3.1) |
+
+The sketch targets an **Espressif ESP32 board with both Wi-Fi and BLE**. The original serial log is from a classic ESP32. ESP32-S2 has no BLE, and ESP32-H2 has no Wi-Fi, so neither can run this complete sketch. `Arduino.h`, `WiFi`, `WebServer`, and `LittleFS` are provided by the ESP32 board package; do not install separate libraries for them. Install only NimBLE-Arduino and ArduinoJson as libraries.
+
+For a classic ESP32 DevKit/WROOM, select the matching board in Arduino IDE (usually **ESP32 Dev Module**), set Flash Size to match the physical module, and choose a partition scheme with a sufficiently large app slot and a filesystem partition for LittleFS. OTA partition schemes allocate less space to each app image than non-OTA schemes.
+
+### If the firmware does not fit
+
+* Set `DEBUG_ENABLED` to `false` in `jk-bms.ino`. This project routes its debug messages through macros, so disabling them also removes the log strings and formatting calls from the build.
+* Keep the board package, libraries, board selection, and partition scheme fixed while comparing build sizes. A larger app image can be caused by the selected core or compiler, but an app partition that is too small is a separate issue.
+* The sketch's ArduinoJson calls are compatible with the 6.x API. As a size-constrained alternative, try **ArduinoJson 6.21.5** ([release](https://github.com/bblanchon/ArduinoJson/releases/tag/v6.21.5)), the latest 6.x release available at the time, and compare the compiled sizes. The size impact depends on the actual build, so verify rather than assume this version is smaller.
 
 *   **Get startet**:
 
@@ -63,9 +100,9 @@ Installation
         
 *   **Install Required Libraries**:
     
-    *   Install the libraries NimBLEDevice + ArduinoJson
+    *   Install **NimBLE-Arduino 2.2.3** and **ArduinoJson 7.3.1** using Library Manager (or use the pinned versions in the table above).
  
-    *   All others are included in the IDE by default
+    *   `NimBLEDevice.h` is provided by NimBLE-Arduino. Wi-Fi, WebServer, and LittleFS come from the Espressif ESP32 boards package; other included headers are part of the Arduino core/toolchain.
  
 *   **Edit settings**:
 
