@@ -4,6 +4,10 @@
 #include <WebServer.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <cstring>
+#include <vector>
+#include "CloudReporter.h"
+#include "secret.h"
 
 // parseDevice und InfoparseData
 // webserver
@@ -22,11 +26,56 @@
 #define DEBUG_PRINTF(...)
 #endif
 
+constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
+constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
+constexpr uint32_t BLE_DATA_TIMEOUT_MS = 30000;
+constexpr size_t BMS_FRAME_SIZE = 300;
 
-// WiFi credentials
-const char* ssid = "test";
-const char* password = "test";
 WebServer server(80);  // Webserver auf Port 80
+
+uint32_t wifiAttemptStartedAt = 0;
+uint32_t wifiLastAttemptAt = 0;
+bool wifiAttemptActive = false;
+bool wifiWasConnected = false;
+
+void startWiFiAttempt() {
+  DEBUG_PRINTLN("Starting WiFi connection attempt...");
+  WiFi.begin(ssid, password);
+  wifiAttemptStartedAt = millis();
+  wifiLastAttemptAt = wifiAttemptStartedAt;
+  wifiAttemptActive = true;
+}
+
+void maintainWiFiConnection() {
+  const uint32_t now = millis();
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wifiWasConnected) {
+      Serial.println("WiFi connected");
+      Serial.println("IP address:");
+      Serial.println(WiFi.localIP());
+      wifiWasConnected = true;
+    }
+    wifiAttemptActive = false;
+    return;
+  }
+
+  if (wifiWasConnected) {
+    DEBUG_PRINTLN("WiFi disconnected");
+    wifiWasConnected = false;
+    wifiAttemptActive = false;
+    wifiLastAttemptAt = now;
+  }
+
+  if (wifiAttemptActive && now - wifiAttemptStartedAt >= WIFI_CONNECT_TIMEOUT_MS) {
+    DEBUG_PRINTLN("WiFi connection timed out; retry scheduled");
+    wifiAttemptActive = false;
+    wifiLastAttemptAt = now;
+  }
+
+  if (!wifiAttemptActive && now - wifiLastAttemptAt >= WIFI_RETRY_INTERVAL_MS) {
+    startWiFiAttempt();
+  }
+}
 
 uint32_t minFreeHeap = UINT32_MAX;
 unsigned long lastHeapUpdate = 0;
@@ -169,16 +218,18 @@ public:
   const NimBLEAdvertisedDevice* advDevice = nullptr;
   bool doConnect = false;
   bool connected = false;
-  uint32_t lastNotifyTime = 0;
+  bool hasTelemetry = false;
+  uint32_t lastDataFrameTime = 0;
   std::string targetMAC;
+  std::string vendorID;
+  std::string serialNumber;
 
   // Data Processing
-  byte receivedBytes[320];
-  int frame = 0;
+  byte receivedBytes[BMS_FRAME_SIZE];
+  size_t frame = 0;
   bool received_start = false;
   bool received_complete = false;
   bool new_data = false;
-  int ignoreNotifyCount = 0;
 
   // BMS Data Fields
   float cellVoltage[16] = { 0 };
@@ -241,6 +292,7 @@ public:
   void bms_settings();
   void writeRegister(uint8_t address, uint32_t value, uint8_t length);
   void handleNotification(uint8_t* pData, size_t length);
+  void resetFrame();
 
 private:
   uint8_t crc(const uint8_t data[], uint16_t len) {
@@ -253,13 +305,17 @@ private:
 //********************************************
 // Global Variables and Callbacks
 //********************************************
-JKBMS jkBmsDevices[] = {
-  JKBMS("20:22:08:25:26:8b"),  // Only one device configured
-  // JKBMS("20:aa:08:25:26:8b"),    // Add more devices here
-  // JKBMS("MAC_ADDRESS_3")
-};
+std::vector<JKBMS> jkBmsDevices = []() {
+  std::vector<JKBMS> devices;
+  const size_t deviceCount = sizeof(jkBmsMacAddresses) / sizeof(jkBmsMacAddresses[0]);
+  devices.reserve(deviceCount);
+  for (size_t i = 0; i < deviceCount; i++) {
+    devices.emplace_back(jkBmsMacAddresses[i]);
+  }
+  return devices;
+}();
 
-const int bmsDeviceCount = sizeof(jkBmsDevices) / sizeof(jkBmsDevices[0]);  // Dynamic device count
+const int bmsDeviceCount = sizeof(jkBmsMacAddresses) / sizeof(jkBmsMacAddresses[0]);  // Dynamic device count
 
 NimBLEScan* pScan;
 unsigned long lastScanTime = 0;
@@ -278,6 +334,8 @@ public:
     DEBUG_PRINTF("BMS %s disconnected (reason %d)\n", bms->targetMAC.c_str(), reason);
     bms->connected = false;
     bms->doConnect = false;
+    bms->pChr = nullptr;
+    bms->resetFrame();
   }
 };
 
@@ -308,6 +366,7 @@ void notifyCB(NimBLERemoteCharacteristic* pChr, uint8_t* pData, size_t length, b
 // JKBMS Method Implementation
 //********************************************
 bool JKBMS::connectToServer() {
+  resetFrame();
   NimBLEClient* pClient = NimBLEDevice::getClientByPeerAddress(advDevice->getAddress());
 
   if (!pClient) {
@@ -319,6 +378,7 @@ bool JKBMS::connectToServer() {
 
   if (!pClient->connect(advDevice)) {
     DEBUG_PRINTF("BMS connection failed: %s\n", targetMAC.c_str());
+    pChr = nullptr;
     return false;
   }
 
@@ -328,6 +388,7 @@ bool JKBMS::connectToServer() {
     if (pChr && pChr->canNotify()) {
       if (pChr->subscribe(true, notifyCB)) {
         DEBUG_PRINTF("BMS connected: %s (RSSI %d dBm)\n", targetMAC.c_str(), pClient->getRssi());
+        lastDataFrameTime = millis();
         delay(500);
         writeRegister(0x97, 0x00000000, 0x00);  // COMMAND_DEVICE_INFO
         delay(500);
@@ -337,54 +398,59 @@ bool JKBMS::connectToServer() {
     }
   }
   DEBUG_PRINTLN("Service or Characteristic not found or unable to subscribe.");
+  pChr = nullptr;
+  pClient->disconnect();
   return false;
 }
 
 void JKBMS::handleNotification(uint8_t* pData, size_t length) {
-  lastNotifyTime = millis();
+  if (length == 0) return;
 
-  if (ignoreNotifyCount > 0) {
-    ignoreNotifyCount--;
+  const bool startsFrame = length >= 4 &&
+                           pData[0] == 0x55 && pData[1] == 0xAA &&
+                           pData[2] == 0xEB && pData[3] == 0x90;
+  if (startsFrame) {
+    resetFrame();
+    received_start = true;
+  }
+
+  if (!received_start || received_complete) return;
+  if (frame > sizeof(receivedBytes) || length > sizeof(receivedBytes) - frame) {
+    DEBUG_PRINTF("BMS %s frame exceeded buffer; resetting parser\n", targetMAC.c_str());
+    resetFrame();
     return;
   }
 
-  // Check for start of data frame
-  if (pData[0] == 0x55 && pData[1] == 0xAA && pData[2] == 0xEB && pData[3] == 0x90) {
-    frame = 0;
-    received_start = true;
-    received_complete = false;
+  std::memcpy(receivedBytes + frame, pData, length);
+  frame += length;
+  if (frame < BMS_FRAME_SIZE) return;
 
-    // Store the received data
-    for (int i = 0; i < length; i++) {
-      receivedBytes[frame++] = pData[i];
-    }
-  } else if (received_start && !received_complete) {
-    for (int i = 0; i < length; i++) {
-      receivedBytes[frame++] = pData[i];
-      if (frame >= 300) {
-        received_complete = true;
-        received_start = false;
-        new_data = true;
-
-        // Determine the type of data frame based on pData[4]
-        switch (receivedBytes[4]) {  // Use receivedBytes[4] instead of pData[4]
-          case 0x01:
-            bms_settings();
-            break;
-          case 0x02:
-            parseData();
-            break;
-          case 0x03:
-            parseDeviceInfo();
-            break;
-          default:
-            break;
-        }
-
-        break;  // Exit the loop after processing the complete frame
-      }
-    }
+  received_complete = true;
+  received_start = false;
+  new_data = true;
+  switch (receivedBytes[4]) {
+    case 0x01:
+      bms_settings();
+      break;
+    case 0x02:
+      lastDataFrameTime = millis();
+      parseData();
+      break;
+    case 0x03:
+      parseDeviceInfo();
+      break;
+    default:
+      DEBUG_PRINTF("BMS %s sent unknown frame type 0x%02X\n", targetMAC.c_str(), receivedBytes[4]);
+      resetFrame();
+      break;
   }
+}
+
+void JKBMS::resetFrame() {
+  frame = 0;
+  received_start = false;
+  received_complete = false;
+  new_data = false;
 }
 
 void JKBMS::writeRegister(uint8_t address, uint32_t value, uint8_t length) {
@@ -441,23 +507,31 @@ void JKBMS::parseDeviceInfo() {
 
   // Überprüfen, ob genügend Daten empfangen wurden
   if (frame < 134) {  // 134 Bytes sind für die Geräteinformationen erforderlich
-    DEBUG_PRINTF("Incomplete device info from BMS %s (%d bytes)\n", targetMAC.c_str(), frame);
+    DEBUG_PRINTF("Incomplete device info from BMS %s (%u bytes)\n", targetMAC.c_str(), static_cast<unsigned>(frame));
     return;
   }
 
-  // Extrahieren der Geräteinformationen aus den empfangenen Bytes
-  std::string hardwareVersion(receivedBytes + 22, receivedBytes + 22 + 8);
-  std::string softwareVersion(receivedBytes + 30, receivedBytes + 30 + 8);
+  auto readAsciiField = [this](size_t offset, size_t length) {
+    size_t fieldLength = 0;
+    while (fieldLength < length && receivedBytes[offset + fieldLength] != 0) {
+      fieldLength++;
+    }
+    return std::string(reinterpret_cast<const char*>(receivedBytes + offset), fieldLength);
+  };
+
+  vendorID = readAsciiField(6, 16);
+  std::string hardwareVersion = readAsciiField(22, 8);
+  std::string softwareVersion = readAsciiField(30, 8);
   uint32_t uptime = (receivedBytes[41] << 24) | (receivedBytes[40] << 16) | (receivedBytes[39] << 8) | receivedBytes[38];
-  std::string deviceName(receivedBytes + 46, receivedBytes + 46 + 16);
-  DEBUG_PRINTF("BMS info: %s, HW %s, FW %s, uptime %lu s\n",
-               deviceName.c_str(), hardwareVersion.c_str(), softwareVersion.c_str(),
+  serialNumber = readAsciiField(86, 10);
+  DEBUG_PRINTF("BMS info: %s, serial %s, HW %s, FW %s, uptime %lu s\n",
+               vendorID.c_str(), serialNumber.c_str(), hardwareVersion.c_str(), softwareVersion.c_str(),
                static_cast<unsigned long>(uptime));
 }
 
 void JKBMS::parseData() {
   new_data = false;
-  ignoreNotifyCount = 10;
+  hasTelemetry = true;
   // Cell voltages
   for (int j = 0, i = 7; i < 38; j++, i += 2) {
     cellVoltage[j] = ((receivedBytes[i] << 8 | receivedBytes[i - 1]) * 0.001);
@@ -555,8 +629,9 @@ void handleRoot() {
   }
 }
 
-void handleJSON() {
-  const size_t capacity = JSON_OBJECT_SIZE(50) + JSON_ARRAY_SIZE(16) + 2000;  // Ausreichend großer Buffer
+String buildTelemetryJson() {
+  const size_t capacity = JSON_OBJECT_SIZE(bmsDeviceCount) +
+                          bmsDeviceCount * (JSON_OBJECT_SIZE(55) + JSON_ARRAY_SIZE(16) * 2) + 2000;
   DynamicJsonDocument doc(capacity);
 
   for (int i = 0; i < bmsDeviceCount; i++) {
@@ -564,6 +639,9 @@ void handleJSON() {
     JsonObject device = doc.createNestedObject(bms.targetMAC);
 
     // Allgemeine Informationen
+    device["bms_type"] = "JK";
+    device["id"] = bms.serialNumber.c_str();
+    device["name"] = bms.vendorID.c_str();
     device["battery_voltage"] = bms.Battery_Voltage;
     device["battery_power"] = bms.Battery_Power;
     device["charge_current"] = bms.Charge_Current;
@@ -632,6 +710,11 @@ void handleJSON() {
 
   String jsonResponse;
   serializeJson(doc, jsonResponse);
+  return jsonResponse;
+}
+
+void handleJSON() {
+  const String jsonResponse = buildTelemetryJson();
   server.send(200, "application/json", jsonResponse);
 }
 
@@ -874,17 +957,12 @@ String getLastModified(File file) {
 void setup() {
   Serial.begin(115200);
   lastMillis = millis();
-  // WiFi initialisieren
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\nWiFi connected");
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP());
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  startWiFiAttempt();
   configTime(0, 0, "fritz.box", "de.pool.ntp.org");
   setupLittleFS();
+  CloudReporter::begin();
   server.serveStatic("/main", LittleFS, "/index.html");
   server.serveStatic("/style.css", LittleFS, "/style.css", "text/css");
   server.on("/", HTTP_GET, handleRoot);
@@ -913,6 +991,7 @@ void loop() {
   calculateUptime();
   monitorFreeHeap();
 
+  maintainWiFiConnection();
   server.handleClient();
   // Connection management
   int connectedCount = 0;  // Counter for connected devices
@@ -927,10 +1006,22 @@ void loop() {
 
     if (jkBmsDevices[i].connected) {
       connectedCount++;  // Increment counter for each connected device
-      if (millis() - jkBmsDevices[i].lastNotifyTime > 20000) {
-        DEBUG_PRINTF("%s connection timeout\n", jkBmsDevices[i].targetMAC.c_str());
-        NimBLEClient* pClient = NimBLEDevice::getClientByPeerAddress(jkBmsDevices[i].advDevice->getAddress());
-        if (pClient) pClient->disconnect();
+      const uint32_t now = millis();
+      if (now - jkBmsDevices[i].lastDataFrameTime >= BLE_DATA_TIMEOUT_MS) {
+        DEBUG_PRINTF("%s valid data timeout; reconnecting\n", jkBmsDevices[i].targetMAC.c_str());
+        jkBmsDevices[i].lastDataFrameTime = now;
+        NimBLEClient* pClient = nullptr;
+        if (jkBmsDevices[i].advDevice) {
+          pClient = NimBLEDevice::getClientByPeerAddress(jkBmsDevices[i].advDevice->getAddress());
+        }
+        if (pClient) {
+          pClient->disconnect();
+        } else {
+          jkBmsDevices[i].connected = false;
+          jkBmsDevices[i].doConnect = false;
+          jkBmsDevices[i].pChr = nullptr;
+          jkBmsDevices[i].resetFrame();
+        }
       }
     }
   }
@@ -940,6 +1031,14 @@ void loop() {
     DEBUG_PRINTLN("Starting scan...");
     pScan->start(5000, false, true);
     lastScanTime = millis();
+  }
+
+  bool hasTelemetry = false;
+  for (int i = 0; i < bmsDeviceCount; i++) {
+    hasTelemetry = hasTelemetry || jkBmsDevices[i].hasTelemetry;
+  }
+  if (hasTelemetry && CloudReporter::isUpdateDue()) {
+    CloudReporter::maybeSendUpdate(buildTelemetryJson());
   }
 
   delay(10);

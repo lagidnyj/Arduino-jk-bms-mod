@@ -1,5 +1,9 @@
 {
   "20:22:08:25:26:8b": {
+    "bms_type": "JK",
+    "id": "2082321439",
+    "name": "JK_BD4A20S4P",
+    "connected": true,
     "battery_voltage": 33.28,
     "battery_power": 0.0,
     "charge_current": 0.0,
