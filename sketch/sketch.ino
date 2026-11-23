@@ -30,6 +30,8 @@ constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 10000;
 constexpr uint32_t BLE_DATA_TIMEOUT_MS = 30000;
 constexpr size_t BMS_FRAME_SIZE = 300;
+constexpr wifi_power_t WIFI_TX_POWER_PRESET = WIFI_POWER_11dBm;
+constexpr char WIFI_HOSTNAME[] = "JK-BMS-ESP";
 
 WebServer server(80);  // Webserver auf Port 80
 
@@ -51,8 +53,12 @@ void maintainWiFiConnection() {
   if (WiFi.status() == WL_CONNECTED) {
     if (!wifiWasConnected) {
       Serial.println("WiFi connected");
-      Serial.println("IP address:");
+      Serial.print("Hostname: ");
+      Serial.println(WIFI_HOSTNAME);
+      Serial.print("IP address: ");
       Serial.println(WiFi.localIP());
+      Serial.print("MAC address: ");
+      Serial.println(WiFi.macAddress());
       wifiWasConnected = true;
     }
     wifiAttemptActive = false;
@@ -958,6 +964,8 @@ void setup() {
   Serial.begin(115200);
   lastMillis = millis();
   WiFi.mode(WIFI_STA);
+  WiFi.setHostname(WIFI_HOSTNAME);
+  WiFi.setTxPower(WIFI_TX_POWER_PRESET);
   WiFi.setAutoReconnect(true);
   startWiFiAttempt();
   configTime(0, 0, "fritz.box", "de.pool.ntp.org");

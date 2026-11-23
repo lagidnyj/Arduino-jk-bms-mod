@@ -33,6 +33,8 @@ ESP32-S2 has no BLE, and ESP32-H2 has no Wi-Fi, so neither supports this project
 4. Select your ESP32 board and port. Choose a partition scheme that provides a LittleFS-compatible filesystem partition and enough space for the firmware.
 5. Upload the sketch.
 
+In `sketch/sketch.ino`, change `WIFI_TX_POWER_PRESET` to a `WIFI_POWER_*` value supported by your ESP32 chip and Arduino-ESP32 core. The default is `WIFI_POWER_19dBm`. Common ESP32 Arduino power presets and approximate RF output are: WIFI_POWER_MINUS_1dBm (0.8 mW), WIFI_POWER_2dBm (1.6 mW), WIFI_POWER_5dBm (3.2 mW), WIFI_POWER_7dBm (5 mW), WIFI_POWER_8_5dBm (7 mW), WIFI_POWER_11dBm (13 mW), WIFI_POWER_13dBm (20 mW), WIFI_POWER_15dBm (32 mW), WIFI_POWER_17dBm (50 mW), WIFI_POWER_18_5dBm (71 mW), WIFI_POWER_19dBm (79 mW), and WIFI_POWER_19_5dBm (89 mW). Available presets depend on the Arduino-ESP32 core version and chip. The device uses the Wi-Fi hostname `JK-BMS-ESP`; after connecting, Serial Monitor prints the hostname, IP address, and MAC address.
+
 `sketch/partitions.csv` is a custom 4 MB flash layout with OTA app slots and a 448 KiB filesystem partition. Use it only if it matches your board's flash size and partition configuration.
 
 The example values in `secret.h` allow the project to compile, but replace them with your own settings before use. Do not publish real Wi-Fi credentials.
